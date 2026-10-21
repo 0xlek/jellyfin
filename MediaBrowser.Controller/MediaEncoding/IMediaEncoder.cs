@@ -193,6 +193,42 @@ namespace MediaBrowser.Controller.MediaEncoding
             CancellationToken cancellationToken);
 
         /// <summary>
+        /// Extracts video images on an interval and assembles them into trickplay tile grids in a single ffmpeg pass.
+        /// </summary>
+        /// <param name="inputFile">Input file.</param>
+        /// <param name="container">Video container type.</param>
+        /// <param name="mediaSource">Media source information.</param>
+        /// <param name="imageStream">Media stream information.</param>
+        /// <param name="maxWidth">The maximum width of one thumbnail.</param>
+        /// <param name="interval">The interval.</param>
+        /// <param name="tileWidth">Thumbnails per tile row.</param>
+        /// <param name="tileHeight">Thumbnails per tile column.</param>
+        /// <param name="allowHwAccel">Allow hardware decoding and scaling.</param>
+        /// <param name="threads">The input/output thread count for ffmpeg.</param>
+        /// <param name="qualityScale">The qscale value for ffmpeg.</param>
+        /// <param name="priority">The process priority for the ffmpeg process.</param>
+        /// <param name="enableKeyFrameOnlyExtraction">Whether to only decode key frames.</param>
+        /// <param name="encodingHelper">EncodingHelper instance.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns>The temporary tile directory and the thumbnail count.</returns>
+        Task<TrickplayTileSet> ExtractTrickplayTiles(
+            string inputFile,
+            string container,
+            MediaSourceInfo mediaSource,
+            MediaStream imageStream,
+            int maxWidth,
+            TimeSpan interval,
+            int tileWidth,
+            int tileHeight,
+            bool allowHwAccel,
+            int? threads,
+            int? qualityScale,
+            ProcessPriorityClass? priority,
+            bool enableKeyFrameOnlyExtraction,
+            EncodingHelper encodingHelper,
+            CancellationToken cancellationToken);
+
+        /// <summary>
         /// Gets the media info.
         /// </summary>
         /// <param name="request">The request.</param>

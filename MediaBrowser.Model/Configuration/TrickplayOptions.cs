@@ -22,7 +22,7 @@ public class TrickplayOptions
     /// Gets or sets a value indicating whether to only extract key frames.
     /// Significantly faster, but is not compatible with all decoders and/or video files.
     /// </summary>
-    public bool EnableKeyFrameOnlyExtraction { get; set; } = false;
+    public bool EnableKeyFrameOnlyExtraction { get; set; } = true;
 
     /// <summary>
     /// Gets or sets the behavior used by trickplay provider on library scan/update.

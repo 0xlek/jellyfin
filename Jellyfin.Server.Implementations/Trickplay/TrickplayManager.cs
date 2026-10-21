@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -42,7 +43,10 @@ public partial class TrickplayManager : ITrickplayManager
     private readonly IPathManager _pathManager;
 
     private static readonly AsyncNonKeyedLocker _resourcePool = new(1);
-    private static readonly string[] _trickplayImgExtensions = [".jpg"];
+    /// <summary>
+    /// Written next to generated tiles: what they were made from and a version that changes with every generation.
+    /// </summary>
+    private const string MarkerFileName = "trickplay.json";
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TrickplayManager"/> class.
@@ -432,11 +436,18 @@ public partial class TrickplayManager : ITrickplayManager
                 var tileWidth = options.TileWidth;
                 var tileHeight = options.TileHeight;
                 var outputDir = new DirectoryInfo(GetTrickplayDirectory(video, tileWidth, tileHeight, actualWidth, saveWithMedia));
+                var source = GetSourceFingerprint(mediaPath, options);
+                var marker = outputDir.Exists ? ReadMarker(outputDir.FullName) : null;
 
-                // Import existing trickplay tiles
-                if (!replace && outputDir.Exists)
+                // Tiles without a marker were placed by hand or by an older server and are kept as they are
+                if (marker is not null && !string.Equals(marker.Source, source, StringComparison.Ordinal))
                 {
-                    var existingFiles = outputDir.GetFiles();
+                    _logger.LogInformation("Source of {Path} changed since its trickplay tiles were made, regenerating", mediaPath);
+                }
+                else if (!replace && outputDir.Exists)
+                {
+                    // Import existing trickplay tiles
+                    var existingFiles = outputDir.GetFiles("*.jpg");
                     if (existingFiles.Length > 0)
                     {
                         var hasTrickplayResolution = await HasTrickplayResolutionAsync(video.Id, actualWidth).ConfigureAwait(false);
@@ -479,34 +490,33 @@ public partial class TrickplayManager : ITrickplayManager
                 var container = mediaSource.Container;
 
                 _logger.LogInformation("Creating trickplay files at {Width} width, for {Path} [ID: {ItemId}]", actualWidth, mediaPath, video.Id);
-                imgTempDir = await _mediaEncoder.ExtractVideoImagesOnIntervalAccelerated(
+                var tileSet = await _mediaEncoder.ExtractTrickplayTiles(
                     mediaPath,
                     container,
                     mediaSource,
                     mediaStream,
                     actualWidth,
                     TimeSpan.FromMilliseconds(options.Interval),
+                    tileWidth,
+                    tileHeight,
                     options.EnableHwAcceleration,
-                    options.EnableHwEncoding,
                     options.ProcessThreads,
                     options.Qscale,
                     options.ProcessPriority,
                     options.EnableKeyFrameOnlyExtraction,
                     _encodingHelper,
                     cancellationToken).ConfigureAwait(false);
+                imgTempDir = tileSet.Directory;
 
-                if (string.IsNullOrEmpty(imgTempDir) || !Directory.Exists(imgTempDir))
+                if (tileSet.ThumbnailCount == 0 || !Directory.Exists(imgTempDir))
                 {
-                    throw new InvalidOperationException("Null or invalid directory from media encoder.");
+                    throw new InvalidOperationException("Media encoder returned no trickplay tiles.");
                 }
 
-                var images = _fileSystem.GetFiles(imgTempDir, _trickplayImgExtensions, false, false)
-                    .Select(i => i.FullName)
-                    .OrderBy(i => i)
-                    .ToList();
-
-                // Create tiles
-                var trickplayInfo = CreateTiles(images, actualWidth, options, outputDir.FullName);
+                var trickplayInfo = DescribeTiles(imgTempDir, tileSet.ThumbnailCount, actualWidth, options);
+                WriteMarker(imgTempDir, new TrickplayMarker(source, Guid.NewGuid().ToString("N")[..12]));
+                PublishTiles(imgTempDir, outputDir.FullName);
+                imgTempDir = string.Empty;
 
                 // Save tiles info
                 try
@@ -622,6 +632,93 @@ public partial class TrickplayManager : ITrickplayManager
         {
             Directory.Delete(workDir, true);
             throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public string? GetTrickplayVersion(BaseItem item, TrickplayInfo info, bool saveWithMedia)
+        => ReadTrickplayVersion(GetTrickplayDirectory(item, info.TileWidth, info.TileHeight, info.Width, saveWithMedia));
+
+    /// <inheritdoc />
+    public string? ReadTrickplayVersion(string directory) => ReadMarker(directory)?.Version;
+
+    /// <summary>
+    /// Identifies the media file and the settings the tiles depend on, so a replaced file or a new interval regenerates them.
+    /// </summary>
+    private static string GetSourceFingerprint(string mediaPath, TrickplayOptions options)
+    {
+        var file = new FileInfo(mediaPath);
+        return string.Create(CultureInfo.InvariantCulture, $"{file.Length}:{file.LastWriteTimeUtc.Ticks}:{options.Interval}");
+    }
+
+    private static TrickplayMarker? ReadMarker(string directory)
+    {
+        try
+        {
+            using var stream = File.OpenRead(Path.Combine(directory, MarkerFileName));
+            return JsonSerializer.Deserialize<TrickplayMarker>(stream);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static void WriteMarker(string directory, TrickplayMarker marker)
+        => File.WriteAllText(Path.Combine(directory, MarkerFileName), JsonSerializer.Serialize(marker));
+
+    private TrickplayInfo DescribeTiles(string directory, int thumbnailCount, int width, TrickplayOptions options)
+    {
+        var tiles = new DirectoryInfo(directory).GetFiles("*.jpg");
+        var info = new TrickplayInfo
+        {
+            Width = width,
+            Interval = options.Interval,
+            TileWidth = options.TileWidth,
+            TileHeight = options.TileHeight,
+            ThumbnailCount = thumbnailCount,
+            // Grids are always full size, so one thumbnail is a fixed fraction of any tile
+            Height = _imageEncoder.GetImageSize(tiles[0].FullName).Height / options.TileHeight
+        };
+
+        foreach (var tile in tiles)
+        {
+            var bitrate = (int)Math.Ceiling(tile.Length * 8m / info.TileWidth / info.TileHeight / (info.Interval / 1000m));
+            info.Bandwidth = Math.Max(info.Bandwidth, bitrate);
+        }
+
+        return info;
+    }
+
+    /// <summary>
+    /// Moves new tiles into place by renaming on the destination file system, so readers never see a mix of
+    /// old and new tiles. Leftover staging folders do not match the folder pattern and are pruned on the next refresh.
+    /// </summary>
+    private void PublishTiles(string sourceDirectory, string outputDirectory)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var staging = outputDirectory + ".new-" + suffix;
+        _fileSystem.MoveDirectory(sourceDirectory, staging);
+
+        string? retired = null;
+        if (Directory.Exists(outputDirectory))
+        {
+            retired = outputDirectory + ".old-" + suffix;
+            Directory.Move(outputDirectory, retired);
+        }
+
+        Directory.Move(staging, outputDirectory);
+
+        if (retired is not null)
+        {
+            try
+            {
+                Directory.Delete(retired, true);
+            }
+            catch (IOException ex)
+            {
+                _logger.LogWarning(ex, "Unable to remove replaced trickplay tiles at {Directory}", retired);
+            }
         }
     }
 

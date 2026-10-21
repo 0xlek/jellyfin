@@ -59,4 +59,9 @@ public record TrickplayInfoDto
     /// Gets the peak bandwidth usage in bits per second.
     /// </summary>
     public int Bandwidth { get; init; }
+
+    /// <summary>
+    /// Gets the version of the generated tiles. Passed as <c>v</c> on tile requests, it lets clients cache tiles forever.
+    /// </summary>
+    public string? Version { get; init; }
 }

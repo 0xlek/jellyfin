@@ -52,6 +52,8 @@ namespace MediaBrowser.MediaEncoding.Encoder
         /// </summary>
         internal const int DefaultHdrImageExtractionTimeout = 20000;
 
+        private const string TrickplayFramesFileName = "frames.txt";
+
         private readonly ILogger<MediaEncoder> _logger;
         private readonly IServerConfigurationManager _configurationManager;
         private readonly IFileSystem _fileSystem;
@@ -831,7 +833,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
         }
 
         /// <inheritdoc />
-        public async Task<string> ExtractVideoImagesOnIntervalAccelerated(
+        public Task<string> ExtractVideoImagesOnIntervalAccelerated(
             string inputFile,
             string container,
             MediaSourceInfo mediaSource,
@@ -844,6 +846,83 @@ namespace MediaBrowser.MediaEncoding.Encoder
             int? qualityScale,
             ProcessPriorityClass? priority,
             bool enableKeyFrameOnlyExtraction,
+            EncodingHelper encodingHelper,
+            CancellationToken cancellationToken)
+            => ExtractVideoImagesOnIntervalCore(
+                inputFile,
+                container,
+                mediaSource,
+                imageStream,
+                maxWidth,
+                interval,
+                allowHwAccel,
+                enableHwEncoding,
+                threads,
+                qualityScale,
+                priority,
+                enableKeyFrameOnlyExtraction,
+                null,
+                encodingHelper,
+                cancellationToken);
+
+        /// <inheritdoc />
+        public async Task<TrickplayTileSet> ExtractTrickplayTiles(
+            string inputFile,
+            string container,
+            MediaSourceInfo mediaSource,
+            MediaStream imageStream,
+            int maxWidth,
+            TimeSpan interval,
+            int tileWidth,
+            int tileHeight,
+            bool allowHwAccel,
+            int? threads,
+            int? qualityScale,
+            ProcessPriorityClass? priority,
+            bool enableKeyFrameOnlyExtraction,
+            EncodingHelper encodingHelper,
+            CancellationToken cancellationToken)
+        {
+            // The tile filter needs frames in system memory, so encoding stays on the CPU; decoding may still use the GPU.
+            var directory = await ExtractVideoImagesOnIntervalCore(
+                inputFile,
+                container,
+                mediaSource,
+                imageStream,
+                maxWidth,
+                interval,
+                allowHwAccel,
+                false,
+                threads,
+                qualityScale,
+                priority,
+                enableKeyFrameOnlyExtraction,
+                (tileWidth, tileHeight),
+                encodingHelper,
+                cancellationToken).ConfigureAwait(false);
+
+            var framesPath = Path.Combine(directory, TrickplayFramesFileName);
+            var thumbnailCount = (await File.ReadAllLinesAsync(framesPath, cancellationToken).ConfigureAwait(false))
+                .Count(line => line.Length > 0 && line[0] != '#');
+            File.Delete(framesPath);
+
+            return new TrickplayTileSet(directory, thumbnailCount);
+        }
+
+        private async Task<string> ExtractVideoImagesOnIntervalCore(
+            string inputFile,
+            string container,
+            MediaSourceInfo mediaSource,
+            MediaStream imageStream,
+            int maxWidth,
+            TimeSpan interval,
+            bool allowHwAccel,
+            bool enableHwEncoding,
+            int? threads,
+            int? qualityScale,
+            ProcessPriorityClass? priority,
+            bool enableKeyFrameOnlyExtraction,
+            (int Width, int Height)? tiles,
             EncodingHelper encodingHelper,
             CancellationToken cancellationToken)
         {
@@ -929,7 +1008,10 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 throw new InvalidOperationException($"Unable to locate requested stream {imageStream.Title}");
             }
 
-            inputArg += " -map 0:" + streamIndex;
+            if (tiles is null)
+            {
+                inputArg += " -map 0:" + streamIndex;
+            }
 
             var filterParam = encodingHelper.GetVideoProcessingFilterParam(jobState, options, vidEncoder).Trim();
             if (string.IsNullOrWhiteSpace(filterParam))
@@ -937,7 +1019,9 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 throw new InvalidOperationException("EncodingHelper returned empty or invalid filter parameters.");
             }
 
-            // Normalize invalid PTS from containers for non keyframe only mode
+            // Normalize invalid PTS from containers for non keyframe only mode. Only frames without a timestamp get one
+            // derived from the frame rate: files often declare a wrong rate, and renumbering every frame would make
+            // the thumbnails drift away from the times they are shown for.
             if (!enableKeyFrameOnlyExtraction)
             {
                 var fpsFilterIndex = filterParam.IndexOf("fps=", StringComparison.Ordinal);
@@ -946,7 +1030,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                     var inputFrameRate = (imageStream.ReferenceFrameRate.HasValue && imageStream.ReferenceFrameRate > 0)
                         ? imageStream.ReferenceFrameRate.Value : 30;
 
-                    var setPtsFilter = string.Create(CultureInfo.InvariantCulture, $"setpts=N/{inputFrameRate:F3}/TB,");
+                    var setPtsFilter = string.Create(CultureInfo.InvariantCulture, $"setpts=if(isnan(PTS)\\,N/{inputFrameRate:F3}/TB\\,PTS),");
 
                     filterParam = filterParam.Insert(fpsFilterIndex, setPtsFilter);
                 }
@@ -965,6 +1049,8 @@ namespace MediaBrowser.MediaEncoding.Encoder
                     threads,
                     qualityScale,
                     priority,
+                    streamIndex,
+                    tiles,
                     cancellationToken).ConfigureAwait(false);
             }
             catch (FfmpegException ex)
@@ -977,7 +1063,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 _logger.LogWarning(ex, "I-frame trickplay extraction failed, will attempt standard way. Input: {InputFile}", inputFile);
             }
 
-            return await ExtractVideoImagesOnIntervalInternal(inputArg, filterParam, vidEncoder, threads, qualityScale, priority, cancellationToken).ConfigureAwait(false);
+            return await ExtractVideoImagesOnIntervalInternal(inputArg, filterParam, vidEncoder, threads, qualityScale, priority, streamIndex, tiles, cancellationToken).ConfigureAwait(false);
         }
 
         private async Task<string> ExtractVideoImagesOnIntervalInternal(
@@ -987,6 +1073,8 @@ namespace MediaBrowser.MediaEncoding.Encoder
             int? outputThreads,
             int? qualityScale,
             ProcessPriorityClass? priority,
+            int streamIndex,
+            (int Width, int Height)? tiles,
             CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(inputArg))
@@ -1024,9 +1112,21 @@ namespace MediaBrowser.MediaEncoding.Encoder
             var targetDirectory = Path.Combine(_configurationManager.ApplicationPaths.TempDirectory, Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(targetDirectory);
             var outputPath = Path.Combine(targetDirectory, "%08d.jpg");
+            var passthrough = EncodingHelper.GetVideoSyncOption("0", EncoderVersion).Trim() + " ";
 
             // Final command arguments
-            var args = string.Format(
+            var args = tiles is { } grid
+                ? BuildTrickplayTileArguments(
+                    inputArg,
+                    filterParam,
+                    streamIndex,
+                    grid,
+                    outputThreads.GetValueOrDefault(_threads),
+                    vidEncoder,
+                    encoderQualityOption + encoderQuality + " ",
+                    passthrough,
+                    targetDirectory)
+                : string.Format(
                 CultureInfo.InvariantCulture,
                 "-loglevel error {0} -an -sn {1} -threads {2} -c:v {3} {4}{5}{6}-f {7} \"{8}\"",
                 inputArg,
@@ -1035,7 +1135,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 vidEncoder,
                 encoderQualityOption + encoderQuality + " ",
                 vidEncoder.Contains("videotoolbox", StringComparison.InvariantCultureIgnoreCase) ? "-allow_sw 1 " : string.Empty, // allow_sw fallback for some intel macs
-                EncodingHelper.GetVideoSyncOption("0", EncoderVersion).Trim() + " ", // passthrough timestamp
+                passthrough, // passthrough timestamp
                 "image2",
                 outputPath);
 
@@ -1083,7 +1183,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                     // Making the assumption that as long as new jpegs are showing up, everything is good.
 
                     bool isResponsive = true;
-                    int lastCount = 0;
+                    long lastWritten = 0;
                     var timeoutMs = _configurationManager.Configuration.ImageExtractionTimeoutMs;
                     timeoutMs = timeoutMs <= 0 ? DefaultHdrImageExtractionTimeout : timeoutMs;
 
@@ -1101,10 +1201,11 @@ namespace MediaBrowser.MediaEncoding.Encoder
                             // We don't actually expect the process to be finished in one timeout span, just that one image has been generated.
                         }
 
-                        var jpegCount = _fileSystem.GetFilePaths(targetDirectory).Count();
+                        // Tiles appear only every TileWidth * TileHeight thumbnails, but the frame list grows with each one
+                        var written = new DirectoryInfo(targetDirectory).EnumerateFiles().Sum(f => f.Length);
 
-                        isResponsive = jpegCount > lastCount;
-                        lastCount = jpegCount;
+                        isResponsive = written > lastWritten;
+                        lastWritten = written;
                     }
 
                     if (!ranToCompletion)
@@ -1137,6 +1238,44 @@ namespace MediaBrowser.MediaEncoding.Encoder
 
                 return targetDirectory;
             }
+        }
+
+        /// <summary>
+        /// Builds one ffmpeg pass that writes the thumbnails straight into tile grids (0.jpg, 1.jpg, ...), padding the
+        /// last grid, and lists every thumbnail in a frame file so they can be counted afterwards.
+        /// </summary>
+        private static string BuildTrickplayTileArguments(
+            string inputArg,
+            string filterParam,
+            int streamIndex,
+            (int Width, int Height) grid,
+            int threads,
+            string vidEncoder,
+            string quality,
+            string passthrough,
+            string targetDirectory)
+        {
+            const string Prefix = "-vf \"";
+            if (!filterParam.StartsWith(Prefix, StringComparison.Ordinal) || !filterParam.EndsWith('"'))
+            {
+                throw new InvalidOperationException("Trickplay tiles need a plain video filter chain.");
+            }
+
+            var chain = filterParam[Prefix.Length..^1];
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "-loglevel error {0} -filter_complex \"[0:{1}]{2},split=2[count][thumbs];[thumbs]tile={3}x{4}[tiles]\" -map \"[count]\" -c:v rawvideo {5}-flush_packets 1 -f framecrc \"{6}\" -map \"[tiles]\" -an -sn -threads {7} -c:v {8} {9}{5}-start_number 0 -f image2 \"{10}\"",
+                inputArg,
+                streamIndex,
+                chain,
+                grid.Width,
+                grid.Height,
+                passthrough,
+                Path.Combine(targetDirectory, TrickplayFramesFileName),
+                threads,
+                vidEncoder,
+                quality,
+                Path.Combine(targetDirectory, "%d.jpg"));
         }
 
         public string GetTimeParameter(long ticks)

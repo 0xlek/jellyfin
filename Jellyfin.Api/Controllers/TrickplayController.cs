@@ -1,5 +1,7 @@
 using System;
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using System.IO;
 using System.Net.Mime;
 using System.Text;
 using System.Threading.Tasks;
@@ -12,6 +14,7 @@ using MediaBrowser.Model;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Net.Http.Headers;
 
 namespace Jellyfin.Api.Controllers;
 
@@ -73,6 +76,7 @@ public class TrickplayController : BaseJellyfinApiController
     /// <param name="width">The width of a single tile.</param>
     /// <param name="index">The index of the desired tile.</param>
     /// <param name="mediaSourceId">The media version id, if using an alternate version.</param>
+    /// <param name="v">The tile version from the item's trickplay info; when it matches, the tile may be cached forever.</param>
     /// <response code="200">Tile image returned.</response>
     /// <response code="200">Tile image not found at specified index.</response>
     /// <returns>A <see cref="FileResult"/> containing the trickplay tiles image.</returns>
@@ -84,7 +88,8 @@ public class TrickplayController : BaseJellyfinApiController
         [FromRoute, Required] Guid itemId,
         [FromRoute, Required] int width,
         [FromRoute, Required] int index,
-        [FromQuery] Guid? mediaSourceId)
+        [FromQuery] Guid? mediaSourceId,
+        [FromQuery] string? v)
     {
         var item = _libraryManager.GetItemById<BaseItem>(mediaSourceId ?? itemId, User.GetUserId());
         if (item is null)
@@ -97,7 +102,16 @@ public class TrickplayController : BaseJellyfinApiController
         if (!string.IsNullOrEmpty(path) && System.IO.File.Exists(path))
         {
             Response.Headers.ContentDisposition = "attachment";
-            return PhysicalFile(path, MediaTypeNames.Image.Jpeg);
+
+            // A versioned URL names one generation of tiles, which never changes; anything else revalidates
+            var version = _trickplayManager.ReadTrickplayVersion(Path.GetDirectoryName(path)!);
+            Response.Headers.CacheControl = version is not null && string.Equals(v, version, StringComparison.Ordinal)
+                ? "private, max-age=31536000, immutable"
+                : "no-cache";
+
+            var file = new FileInfo(path);
+            var etag = new EntityTagHeaderValue(string.Create(CultureInfo.InvariantCulture, $"\"{file.LastWriteTimeUtc.Ticks:x}-{file.Length:x}\""));
+            return PhysicalFile(path, MediaTypeNames.Image.Jpeg, file.LastWriteTimeUtc, etag);
         }
 
         return NotFound();

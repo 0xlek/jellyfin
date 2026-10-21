@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Trickplay;
@@ -80,6 +81,8 @@ public class TrickplayImagesTask : IScheduledTask
             IsFolder = false,
             Recursive = true,
             IncludeOwnedItems = true,
+            // Newest first, so recent additions get previews before the back catalog
+            OrderBy = [(ItemSortBy.DateCreated, SortOrder.Descending)],
             Limit = QueryPageLimit
         };
 

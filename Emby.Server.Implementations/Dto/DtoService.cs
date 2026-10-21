@@ -1449,11 +1449,18 @@ namespace Emby.Server.Implementations.Dto
                 if (options.ContainsField(ItemFields.Trickplay))
                 {
                     var trickplay = _trickplayManager.GetTrickplayManifest(item).GetAwaiter().GetResult();
+                    var saveWithMedia = _libraryManager.GetLibraryOptions(item).SaveTrickplayWithMedia;
                     dto.Trickplay = trickplay.ToDictionary(
                         mediaStream => mediaStream.Key,
                         mediaStream => mediaStream.Value.ToDictionary(
                             width => width.Key,
-                            width => new TrickplayInfoDto(width.Value)));
+                            width => new TrickplayInfoDto(width.Value)
+                            {
+                                // Alternate versions live under their own items; their tiles are simply not versioned here
+                                Version = Guid.Parse(mediaStream.Key).Equals(item.Id)
+                                    ? _trickplayManager.GetTrickplayVersion(item, width.Value, saveWithMedia)
+                                    : null
+                            }));
                 }
 
                 dto.ExtraType = video.ExtraType;
