@@ -1,0 +1,33 @@
+name: ci
+
+# Upstream's workflows are removed on this branch; everything runs on the self-hosted ARC runners.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK: mcr.microsoft.com/dotnet/sdk:10.0@sha256:0d99ebf1ccad15037b5c98c9fe8979d6b8dbac23812feae2277a0b277b5c5ffa
+
+jobs:
+  test:
+    runs-on: jellyfin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and test
+        # Skia needs fontconfig and freetype, which the SDK image does not ship
+        run: |
+          docker run --rm -v "$PWD":/src -w /src "$SDK" sh -ec '
+            apt-get update -qq && apt-get install -y -qq --no-install-recommends libfontconfig1 libfreetype6 >/dev/null
+            dotnet build Jellyfin.Server/Jellyfin.Server.csproj -c Release -warnaserror
+            dotnet test Jellyfin.sln -c Release
+          '

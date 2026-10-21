@@ -1,0 +1,85 @@
+name: release
+
+# Push a tag like v12.1-0xlek.1 to publish ghcr.io/<owner>/jellyfin:<version> and a GitHub release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create the GitHub release
+  packages: write # push to ghcr.io with GITHUB_TOKEN
+
+concurrency:
+  group: release-${{ github.ref }}
+
+env:
+  SDK: mcr.microsoft.com/dotnet/sdk:10.0@sha256:0d99ebf1ccad15037b5c98c9fe8979d6b8dbac23812feae2277a0b277b5c5ffa
+
+jobs:
+  release:
+    runs-on: jellyfin
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      CANDIDATE: jellyfin:candidate
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and test
+        run: |
+          docker run --rm -v "$PWD":/src -w /src "$SDK" sh -ec '
+            apt-get update -qq && apt-get install -y -qq --no-install-recommends libfontconfig1 libfreetype6 >/dev/null
+            dotnet build Jellyfin.Server/Jellyfin.Server.csproj -c Release -warnaserror
+            dotnet test Jellyfin.sln -c Release
+          '
+          # The test run leaves root-owned bin/obj in the workspace; the image build ignores them
+          docker run --rm -v "$PWD":/src -w /src "$SDK" sh -c 'find . -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +'
+
+      - name: Build image
+        run: |
+          # Layers are cached in the runners' S3 (LOCAL_S3_* from the runner environment)
+          docker buildx create --name ci --driver docker-container --use \
+            --driver-opt network=host \
+            --driver-opt image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+          cache="type=s3,bucket=buildkit,name=jellyfin,region=$LOCAL_S3_REGION,endpoint_url=$LOCAL_S3_ENDPOINT,use_path_style=true,access_key_id=$LOCAL_S3_ACCESS_KEY_ID,secret_access_key=$LOCAL_S3_SECRET_ACCESS_KEY"
+          docker buildx build --platform linux/amd64 --pull --network host --load -t "$CANDIDATE" \
+            --cache-from "$cache" --cache-to "$cache,mode=max" \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.version="$GITHUB_REF_NAME" .
+
+      - name: Smoke test
+        run: |
+          docker run -d --name smoke -p 127.0.0.1:18096:8096 "$CANDIDATE"
+          for _ in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1:18096/health && break; sleep 2; done
+          curl -sf http://127.0.0.1:18096/System/Info/Public | grep -q '"Version":"12.1.0"'
+          # The swapped-in server must still find the bundled ffmpeg and web client
+          docker exec smoke /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -filters | grep -q ' tile '
+          curl -sf -o /dev/null http://127.0.0.1:18096/web/
+
+      - name: Push image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          image="${IMAGE,,}"
+          version="${GITHUB_REF_NAME#v}"
+          # The tested image itself is pushed, not a rebuild
+          for tag in "$version" latest; do
+            docker tag "$CANDIDATE" "$image:$tag"
+            docker push "$image:$tag"
+          done
+          ref=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image:$version" | grep "^$image@")
+          echo "IMAGE_REF=$ref" >> "$GITHUB_ENV"
+          echo "- \`$ref\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --notes "$(printf 'Jellyfin 12.1 with single-pass, cached trickplay generation.\n\nImage: `%s`\n\nDrop-in replacement for `jellyfin/jellyfin:12.1`.' "$IMAGE_REF")"
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f smoke >/dev/null 2>&1 || true
