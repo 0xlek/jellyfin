@@ -58,12 +58,15 @@ jobs:
 
       - name: Smoke test
         run: |
-          docker run -d --name smoke -p 127.0.0.1:18096:8096 "$CANDIDATE"
-          for _ in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1:18096/health && break; sleep 2; done
-          curl -sf http://127.0.0.1:18096/System/Info/Public | grep -q '"Version":"12.1.0"'
+          fail() { echo "::error::$1"; docker logs --tail 80 smoke; exit 1; }
+          docker run -d --name smoke --network host "$CANDIDATE"
+          # A first start creates the database and runs every migration
+          for _ in $(seq 1 90); do curl -sf -o /dev/null http://127.0.0.1:8096/health && break; sleep 2; done
+          curl -sf -o /dev/null http://127.0.0.1:8096/health || fail "server never became healthy"
+          curl -sf http://127.0.0.1:8096/System/Info/Public | grep -q '"Version":"12.1.0"' || fail "unexpected server version"
           # The swapped-in server must still find the bundled ffmpeg and web client
-          docker exec smoke /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -filters | grep -q ' tile '
-          curl -sf -o /dev/null http://127.0.0.1:18096/web/
+          docker exec smoke /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -filters | grep -q ' tile ' || fail "ffmpeg has no tile filter"
+          curl -sf -o /dev/null http://127.0.0.1:8096/web/ || fail "bundled web client missing"
 
       - name: Push image
         env:
