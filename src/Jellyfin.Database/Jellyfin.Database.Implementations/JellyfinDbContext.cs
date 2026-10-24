@@ -173,6 +173,11 @@ public class JellyfinDbContext(DbContextOptions<JellyfinDbContext> options, ILog
     /// </summary>
     public DbSet<KeyframeData> KeyframeData => Set<KeyframeData>();
 
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing each device's progress through items.
+    /// </summary>
+    public DbSet<WatchSession> WatchSessions => Set<WatchSession>();
+
     /*public DbSet<Artwork> Artwork => Set<Artwork>();
 
     public DbSet<Book> Books => Set<Book>();

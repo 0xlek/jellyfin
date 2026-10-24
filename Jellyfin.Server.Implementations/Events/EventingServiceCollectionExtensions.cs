@@ -6,6 +6,7 @@ using Jellyfin.Server.Implementations.Events.Consumers.Session;
 using Jellyfin.Server.Implementations.Events.Consumers.System;
 using Jellyfin.Server.Implementations.Events.Consumers.Updates;
 using Jellyfin.Server.Implementations.Events.Consumers.Users;
+using Jellyfin.Server.Implementations.WatchSessions;
 using MediaBrowser.Common.Updates;
 using MediaBrowser.Controller.Events;
 using MediaBrowser.Controller.Events.Authentication;
@@ -43,6 +44,8 @@ namespace Jellyfin.Server.Implementations.Events
             collection.AddScoped<IEventConsumer<PlaybackStopEventArgs>, PlaybackStopLogger>();
             collection.AddScoped<IEventConsumer<SessionEndedEventArgs>, SessionEndedLogger>();
             collection.AddScoped<IEventConsumer<SessionStartedEventArgs>, SessionStartedLogger>();
+            collection.AddScoped<IEventConsumer<PlaybackProgressEventArgs>, WatchSessionRecorder>();
+            collection.AddScoped<IEventConsumer<PlaybackStopEventArgs>, WatchSessionRecorder>();
 
             // System consumers
             collection.AddScoped<IEventConsumer<PendingRestartEventArgs>, PendingRestartNotifier>();

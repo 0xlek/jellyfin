@@ -49,6 +49,7 @@ using Jellyfin.Server.Implementations.FullSystemBackup;
 using Jellyfin.Server.Implementations.Item;
 using Jellyfin.Server.Implementations.MediaSegments;
 using Jellyfin.Server.Implementations.SystemBackupService;
+using Jellyfin.Server.Implementations.WatchSessions;
 using MediaBrowser.Common;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Events;
@@ -635,6 +636,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IDirectoryService, DirectoryService>();
 
             serviceCollection.AddSingleton<IMediaSegmentManager, MediaSegmentManager>();
+            serviceCollection.AddSingleton<IWatchSessionManager, WatchSessionManager>();
         }
 
         /// <summary>
