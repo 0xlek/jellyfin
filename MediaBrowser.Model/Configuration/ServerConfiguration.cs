@@ -169,13 +169,13 @@ public class ServerConfiguration : BaseApplicationConfiguration
     /// different directories and files.
     /// </summary>
     /// <value>The file watcher delay.</value>
-    public int LibraryMonitorDelay { get; set; } = 60;
+    public int LibraryMonitorDelay { get; set; } = 3;
 
     /// <summary>
     /// Gets or sets the duration in seconds that we will wait after a library updated event before executing the library changed notification.
     /// </summary>
     /// <value>The library update duration.</value>
-    public int LibraryUpdateDuration { get; set; } = 30;
+    public int LibraryUpdateDuration { get; set; } = 2;
 
     /// <summary>
     /// Gets or sets the maximum amount of items to cache.

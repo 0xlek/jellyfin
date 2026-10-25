@@ -113,6 +113,12 @@ namespace Emby.Server.Implementations.Library
             "**/*.bts",
             "**/*.sync",
 
+            // Downloads still in progress (qBittorrent, browsers, download managers)
+            "**/*.!qB",
+            "**/*.part",
+            "**/*.crdownload",
+            "**/*.partial",
+
             // zfs
             "**/.zfs/**",
             "**/.zfs"

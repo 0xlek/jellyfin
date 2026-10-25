@@ -5,15 +5,20 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Providers;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.IO
 {
     public sealed class FileRefresher : IDisposable
     {
+        // Refreshers for different folders finish independently; their library writes go one at a time
+        private static readonly SemaphoreSlim _refreshLock = new(1, 1);
+
         private readonly ILogger _logger;
         private readonly ILibraryManager _libraryManager;
         private readonly IServerConfigurationManager _configurationManager;
@@ -122,42 +127,128 @@ namespace Emby.Server.Implementations.IO
             DisposeTimer();
             Completed?.Invoke(this, EventArgs.Empty);
 
-            try
-            {
-                ProcessPathChanges(paths);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error processing directory changes");
-            }
+            _ = ProcessPathChangesAsync(paths);
         }
 
-        private void ProcessPathChanges(List<string> paths)
+        /// <summary>
+        /// Applies changes file by file: only the folder holding a change is re-read, without descending into the rest
+        /// of the tree, a newly added folder is read in full, and only the changed paths are probed. Refreshing the
+        /// whole parent folder instead made one new file wait on a rescan of everything beside it.
+        /// </summary>
+        private async Task ProcessPathChangesAsync(List<string> paths)
         {
-            var itemsToRefresh = paths
-                .Distinct()
-                .Select(TryGetAffectedBaseItem)
-                .OfType<BaseItem>()
-                .DistinctBy(x => x.Id)
-                .ToList();
+            var plans = new Dictionary<Guid, RefreshPlan>();
+            var fallback = new Dictionary<Guid, BaseItem>();
 
-            foreach (var item in itemsToRefresh)
+            foreach (var path in paths.Distinct(StringComparer.Ordinal))
             {
-                if (item is AggregateFolder)
+                var item = TryGetAffectedBaseItem(path);
+                if (item is null || item is AggregateFolder)
                 {
                     continue;
                 }
 
-                _logger.LogInformation("{Name} ({Path}) will be refreshed.", item.Name, item.Path);
-
                 try
                 {
-                    item.ChangedExternally();
+                    PlanChange(path, item, plans, fallback);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error refreshing {Name}", item.Name);
+                    _logger.LogError(ex, "Error planning the refresh for {Path}", path);
                 }
+            }
+
+            await _refreshLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                foreach (var plan in plans.Values)
+                {
+                    await RunPlan(plan).ConfigureAwait(false);
+                }
+
+                foreach (var item in fallback.Values)
+                {
+                    _logger.LogInformation("{Name} ({Path}) will be refreshed.", item.Name, item.Path);
+                    try
+                    {
+                        item.ChangedExternally();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error refreshing {Name}", item.Name);
+                    }
+                }
+            }
+            finally
+            {
+                _refreshLock.Release();
+            }
+        }
+
+        private static void PlanChange(string path, BaseItem item, Dictionary<Guid, RefreshPlan> plans, Dictionary<Guid, BaseItem> fallback)
+        {
+            // The changed path is the item itself: re-read the folder it sits in, probing just this path
+            var isSelf = string.Equals(item.Path, path, StringComparison.Ordinal);
+            var folder = isSelf ? item.GetParent() as Folder : item as Folder ?? item.GetParent() as Folder;
+
+            // Library roots and containers such as series keep the stock whole-item refresh
+            if (folder is null or CollectionFolder or AggregateFolder || folder is IMetadataContainer || item is IMetadataContainer)
+            {
+                fallback[item.Id] = item;
+                return;
+            }
+
+            if (!plans.TryGetValue(folder.Id, out var plan))
+            {
+                plan = new RefreshPlan(folder);
+                plans[folder.Id] = plan;
+            }
+
+            if (isSelf)
+            {
+                plan.Paths.Add(path);
+                return;
+            }
+
+            // A new or removed path below the folder: the entry directly inside it is what appears or goes
+            var entry = path;
+            while (System.IO.Path.GetDirectoryName(entry) is { } parent && !string.Equals(parent, folder.Path, StringComparison.Ordinal))
+            {
+                entry = parent;
+            }
+
+            plan.Paths.Add(entry);
+            if (Directory.Exists(entry))
+            {
+                plan.NewFolders.Add(entry);
+                plan.Paths.UnionWith(Directory.EnumerateFileSystemEntries(entry, "*", SearchOption.AllDirectories));
+            }
+        }
+
+        private async Task RunPlan(RefreshPlan plan)
+        {
+            var options = new MetadataRefreshOptions(new DirectoryService(BaseItem.FileSystem))
+            {
+                RefreshPaths = plan.Paths.ToArray()
+            };
+
+            _logger.LogInformation("{Name} ({Path}) will be refreshed for {Count} changed path(s).", plan.Folder.Name, plan.Folder.Path, plan.Paths.Count);
+
+            try
+            {
+                await plan.Folder.ValidateChildren(new Progress<double>(), options, recursive: false).ConfigureAwait(false);
+
+                foreach (var path in plan.NewFolders)
+                {
+                    if (_libraryManager.FindByPath(path, true) is Folder added)
+                    {
+                        await added.ValidateChildren(new Progress<double>(), options, recursive: true).ConfigureAwait(false);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error refreshing {Name}", plan.Folder.Name);
             }
         }
 
@@ -205,6 +296,15 @@ namespace Emby.Server.Implementations.IO
             }
 
             return item;
+        }
+
+        private sealed class RefreshPlan(Folder folder)
+        {
+            public Folder Folder { get; } = folder;
+
+            public HashSet<string> Paths { get; } = new(StringComparer.Ordinal);
+
+            public HashSet<string> NewFolders { get; } = new(StringComparer.Ordinal);
         }
 
         private void DisposeTimer()
