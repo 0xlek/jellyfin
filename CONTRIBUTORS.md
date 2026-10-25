@@ -248,6 +248,7 @@
  - [excelsior](https://github.com/excelsior-dev)
  - [TheDreadPirate](https://github.com/thedreaddpirate)
  - [klizas](https://github.com/klizas)
+ - [p27ZuH6CNAdzr](https://github.com/p27ZuH6CNAdzr)
 
 # Emby Contributors
 
