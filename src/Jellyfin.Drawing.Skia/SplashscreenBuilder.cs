@@ -160,7 +160,8 @@ public class SplashscreenBuilder
             };
 
             canvas.SetMatrix(matrix);
-            canvas.DrawBitmap(input, 0, 0);
+            using var image = SKImage.FromBitmap(input);
+            canvas.DrawImage(image, 0, 0, SkiaEncoder.DefaultSamplingOptions);
 
             return bitmap;
         }

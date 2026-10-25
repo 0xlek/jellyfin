@@ -461,13 +461,13 @@ public class SkiaEncoder : IImageEncoder
         }
 
         using var svg = SKSvg.CreateFromFile(path);
-        if (svg.Drawable is null)
+        if (svg.Picture is null)
         {
             return null;
         }
 
-        var width = (int)Math.Round(svg.Drawable.Bounds.Width);
-        var height = (int)Math.Round(svg.Drawable.Bounds.Height);
+        var width = (int)Math.Round(svg.Picture.CullRect.Width);
+        var height = (int)Math.Round(svg.Picture.CullRect.Height);
 
         SKBitmap? bitmap = null;
         try
@@ -903,7 +903,13 @@ public class SkiaEncoder : IImageEncoder
     {
         foreach (var typeface in _typefaces)
         {
-            if (typeface is not null && typeface.ContainsGlyphs(c))
+            if (typeface is null)
+            {
+                continue;
+            }
+
+            using var font = new SKFont(typeface);
+            if (font.ContainsGlyphs(c))
             {
                 return typeface;
             }
