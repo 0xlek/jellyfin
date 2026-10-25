@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json.Serialization;
 using Jellyfin.Database.Implementations.Entities;
 
 namespace MediaBrowser.Model.Dto;
@@ -8,6 +9,15 @@ namespace MediaBrowser.Model.Dto;
 /// </summary>
 public record TrickplayInfoDto
 {
+    /// <summary>
+    /// Initializes a new instance of the <see cref="TrickplayInfoDto"/> class, for reading one back from JSON.
+    /// Without it an item posted back whole, as metadata editors do, fails to deserialize.
+    /// </summary>
+    [JsonConstructor]
+    public TrickplayInfoDto()
+    {
+    }
+
     /// <summary>
     /// Initializes a new instance of the <see cref="TrickplayInfoDto"/> class.
     /// </summary>
