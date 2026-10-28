@@ -1628,6 +1628,17 @@ public class DynamicHlsController : BaseJellyfinApiController
             ? _encodingOptions.MaxMuxingQueueSize.ToString(CultureInfo.InvariantCulture)
             : "128";
 
+        // A keyframe playlist has a segment per keyframe; a tiny hls_time makes ffmpeg cut at every one as well
+        var hlsTime = state.SegmentLength.ToString(CultureInfo.InvariantCulture);
+        if (!isEventPlaylist
+            && state.IsOutputVideo
+            && EncodingHelper.IsCopyCodec(state.OutputVideoCodec)
+            && Guid.TryParse(state.BaseRequest.MediaSourceId, out var mediaSourceId)
+            && _dynamicHlsPlaylistGenerator.HasKeyframeSegments(mediaSourceId, state.MediaPath))
+        {
+            hlsTime = "0.001";
+        }
+
         var baseUrlParam = string.Empty;
         if (isEventPlaylist)
         {
@@ -1647,7 +1658,7 @@ public class DynamicHlsController : BaseJellyfinApiController
             GetVideoArguments(state, startNumber, isEventPlaylist, segmentContainer),
             GetAudioArguments(state),
             maxMuxingQueueSize,
-            state.SegmentLength.ToString(CultureInfo.InvariantCulture),
+            hlsTime,
             segmentFormat,
             startNumber.ToString(CultureInfo.InvariantCulture),
             baseUrlParam,

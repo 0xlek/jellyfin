@@ -39,7 +39,7 @@ public class DynamicHlsPlaylistGenerator : IDynamicHlsPlaylistGenerator
             && request.MediaSourceId is not null
             && TryExtractKeyframes(request.MediaSourceId.Value, request.FilePath, out var keyframeData))
         {
-            segments = ComputeSegments(keyframeData, request.DesiredSegmentLengthMs);
+            segments = ComputeSegments(keyframeData);
         }
         else
         {
@@ -106,6 +106,10 @@ public class DynamicHlsPlaylistGenerator : IDynamicHlsPlaylistGenerator
         return builder.ToString();
     }
 
+    /// <inheritdoc />
+    public bool HasKeyframeSegments(Guid mediaSourceId, string filePath)
+        => TryExtractKeyframes(mediaSourceId, filePath, out _);
+
     private bool TryExtractKeyframes(Guid itemId, string filePath, [NotNullWhen(true)] out KeyframeData? keyframeData)
     {
         keyframeData = null;
@@ -152,7 +156,15 @@ public class DynamicHlsPlaylistGenerator : IDynamicHlsPlaylistGenerator
         return false;
     }
 
-    internal static IReadOnlyList<double> ComputeSegments(KeyframeData keyframeData, int desiredSegmentLengthMs)
+    /// <summary>
+    /// Cuts a segment at every keyframe. A remux copies the video, so ffmpeg can only cut at keyframes, and its
+    /// hls muxer picks them by a running target counted from wherever it was restarted; any grouping of keyframes
+    /// into longer segments would differ between a run from the start and a run restarted after a seek.
+    /// Cutting at every keyframe (ffmpeg gets a tiny hls_time) is the same from any restart point.
+    /// </summary>
+    /// <param name="keyframeData">The keyframes of the video stream.</param>
+    /// <returns>The segment lengths in seconds.</returns>
+    internal static IReadOnlyList<double> ComputeSegments(KeyframeData keyframeData)
     {
         if (keyframeData.KeyframeTicks.Count > 0 && keyframeData.TotalDuration < keyframeData.KeyframeTicks[^1])
         {
@@ -161,18 +173,14 @@ public class DynamicHlsPlaylistGenerator : IDynamicHlsPlaylistGenerator
 
         long lastKeyframe = 0;
         var result = new List<double>();
-        // Scale the segment length to ticks to match the keyframes
-        var desiredSegmentLengthTicks = TimeSpan.FromMilliseconds(desiredSegmentLengthMs).Ticks;
-        var desiredCutTime = desiredSegmentLengthTicks;
-        for (var j = 0; j < keyframeData.KeyframeTicks.Count; j++)
+        // The first keyframe opens the first segment, it never ends one
+        for (var j = 1; j < keyframeData.KeyframeTicks.Count; j++)
         {
             var keyframe = keyframeData.KeyframeTicks[j];
-            if (keyframe >= desiredCutTime)
+            if (keyframe > lastKeyframe)
             {
-                var currentSegmentLength = keyframe - lastKeyframe;
-                result.Add(TimeSpan.FromTicks(currentSegmentLength).TotalSeconds);
+                result.Add(TimeSpan.FromTicks(keyframe - lastKeyframe).TotalSeconds);
                 lastKeyframe = keyframe;
-                desiredCutTime += desiredSegmentLengthTicks;
             }
         }
 

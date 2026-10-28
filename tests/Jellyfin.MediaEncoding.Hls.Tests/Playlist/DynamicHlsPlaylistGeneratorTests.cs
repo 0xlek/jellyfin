@@ -9,23 +9,23 @@ namespace Jellyfin.MediaEncoding.Hls.Tests.Playlist
     {
         [Theory]
         [MemberData(nameof(ComputeSegments_Valid_Success_Data))]
-        public void ComputeSegments_Valid_Success(KeyframeData keyframeData, int desiredSegmentLengthMs, double[] segments)
+        public void ComputeSegments_Valid_Success(KeyframeData keyframeData, double[] segments)
         {
-            Assert.Equal(segments, DynamicHlsPlaylistGenerator.ComputeSegments(keyframeData, desiredSegmentLengthMs));
+            Assert.Equal(segments, DynamicHlsPlaylistGenerator.ComputeSegments(keyframeData));
         }
 
         [Fact]
         public void ComputeSegments_ZeroDurationOvershoot_ClampsToDuration()
         {
             var keyframeData = new KeyframeData(0, new[] { MsToTicks(10000) });
-            Assert.Equal(new[] { 10.0 }, DynamicHlsPlaylistGenerator.ComputeSegments(keyframeData, 6000));
+            Assert.Equal(new[] { 10.0 }, DynamicHlsPlaylistGenerator.ComputeSegments(keyframeData));
         }
 
         [Fact]
         public void ComputeSegments_MinorDurationOvershoot_ClampsToDuration()
         {
             var keyframeData = new KeyframeData(MsToTicks(9900), new[] { 0L, MsToTicks(5000), MsToTicks(10000) });
-            Assert.Equal(new[] { 10.0 }, DynamicHlsPlaylistGenerator.ComputeSegments(keyframeData, 6000));
+            Assert.Equal(new[] { 5.0, 5.0 }, DynamicHlsPlaylistGenerator.ComputeSegments(keyframeData));
         }
 
         [Theory]
@@ -74,28 +74,30 @@ namespace Jellyfin.MediaEncoding.Hls.Tests.Playlist
             return data;
         }
 
-        public static TheoryData<KeyframeData, int, double[]> ComputeSegments_Valid_Success_Data()
+        public static TheoryData<KeyframeData, double[]> ComputeSegments_Valid_Success_Data()
         {
-            var data = new TheoryData<KeyframeData, int, double[]>
+            var data = new TheoryData<KeyframeData, double[]>
             {
                 {
                     new KeyframeData(MsToTicks(35000), new[] { 0, MsToTicks(10427), MsToTicks(20854), MsToTicks(31240) }),
-                    6000,
                     new[] { 10.427, 10.427, 10.386, 3.760 }
                 },
                 {
-                    new KeyframeData(MsToTicks(10000), new[] { 0, MsToTicks(1000), MsToTicks(2000), MsToTicks(3000), MsToTicks(4000), MsToTicks(5000) }),
-                    2000,
-                    new[] { 2.0, 2.0, 6.0 }
+                    // Short and long gaps alike get a segment each, the way ffmpeg cuts them from any restart point
+                    new KeyframeData(MsToTicks(10000), new[] { 0, MsToTicks(900), MsToTicks(2000), MsToTicks(9500) }),
+                    new[] { 0.9, 1.1, 7.5, 0.5 }
+                },
+                {
+                    // A first keyframe after zero still belongs to the first segment
+                    new KeyframeData(MsToTicks(5000), new[] { MsToTicks(40), MsToTicks(2000), MsToTicks(2000) }),
+                    new[] { 2.0, 3.0 }
                 },
                 {
                     new KeyframeData(MsToTicks(10000), new[] { 0L }),
-                    6000,
                     new[] { 10.0 }
                 },
                 {
                     new KeyframeData(MsToTicks(10000), Array.Empty<long>()),
-                    6000,
                     new[] { 10.0 }
                 }
             };

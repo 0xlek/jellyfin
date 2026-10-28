@@ -1,3 +1,5 @@
+using System;
+
 namespace Jellyfin.MediaEncoding.Hls.Playlist;
 
 /// <summary>
@@ -11,4 +13,12 @@ public interface IDynamicHlsPlaylistGenerator
     /// <param name="request">An instance of the <see cref="CreateMainPlaylistRequest"/> class.</param>
     /// <returns>The playlist as a formatted string.</returns>
     string CreateMainPlaylist(CreateMainPlaylistRequest request);
+
+    /// <summary>
+    /// Gets whether a remux playlist for the file is cut at its keyframes, so ffmpeg has to cut at every keyframe too.
+    /// </summary>
+    /// <param name="mediaSourceId">The media source id.</param>
+    /// <param name="filePath">The path to the media file.</param>
+    /// <returns><c>true</c> when the playlist has a segment per keyframe.</returns>
+    bool HasKeyframeSegments(Guid mediaSourceId, string filePath);
 }

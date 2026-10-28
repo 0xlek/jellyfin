@@ -3102,11 +3102,11 @@ namespace MediaBrowser.Controller.MediaEncoding
             if (time > 0)
             {
                 // For direct streaming/remuxing, HLS segments start at keyframes.
-                // However, ffmpeg will seek to previous keyframe when the exact frame time is the input
-                // Workaround this by adding 0.5s offset to the seeking time to get the exact keyframe on most videos.
-                // This will help subtitle syncing.
+                // ffmpeg seeks 3/23 s before the requested time when the video has B-frames and lands on the keyframe
+                // before that, so the segment's own keyframe needs an offset past 0.13 s. It must stay below the gap to
+                // the next keyframe as well, since segments are cut at every keyframe.
                 var isHlsRemuxing = state.IsVideoRequest && state.TranscodingType is TranscodingJobType.Hls && IsCopyCodec(state.OutputVideoCodec);
-                var seekTick = isHlsRemuxing ? time + 5000000L : time;
+                var seekTick = isHlsRemuxing ? time + 1500000L : time;
 
                 // Seeking beyond EOF makes no sense in transcoding. Clamp the seekTick value to
                 // [0, RuntimeTicks - 5.0s], so that the muxer gets packets and avoid error codes.
