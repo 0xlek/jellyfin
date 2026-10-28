@@ -1501,13 +1501,10 @@ public class DynamicHlsController : BaseJellyfinApiController
                     var currentJob = _transcodeManager.GetTranscodingJob(playlistPath, TranscodingJobType);
                     await WaitForActiveTranscodingRequests(currentJob, cancellationToken).ConfigureAwait(false);
 
-                    await _transcodeManager.KillTranscodingJobs(streamingRequest.DeviceId, streamingRequest.PlaySessionId, p => false)
+                    // The playlist is shared by every play session of this stream on the device, so stop all of them;
+                    // segments already made stay, ffmpeg only writes complete ones (temp_file)
+                    await _transcodeManager.KillTranscodingJobs(streamingRequest.DeviceId, null, p => false)
                         .ConfigureAwait(false);
-
-                    if (currentTranscodingIndex.HasValue)
-                    {
-                        await DeleteLastFile(playlistPath, segmentExtension, 0).ConfigureAwait(false);
-                    }
 
                     streamingRequest.StartTimeTicks = streamingRequest.CurrentRuntimeTicks;
 
@@ -1591,7 +1588,8 @@ public class DynamicHlsController : BaseJellyfinApiController
         var segmentFormat = string.Empty;
         var segmentContainer = outputExtension.TrimStart('.');
         var inputModifier = _encodingHelper.GetInputModifier(state, _encodingOptions, segmentContainer);
-        var hlsArguments = $"-hls_playlist_type {(isEventPlaylist ? "event" : "vod")} -hls_list_size 0";
+        // temp_file renames a segment into place once it is complete, so an existing segment file is always whole
+        var hlsArguments = $"-hls_playlist_type {(isEventPlaylist ? "event" : "vod")} -hls_list_size 0 -hls_flags temp_file";
 
         if (string.Equals(segmentContainer, "ts", StringComparison.OrdinalIgnoreCase))
         {
@@ -1944,10 +1942,10 @@ public class DynamicHlsController : BaseJellyfinApiController
         var segmentExists = System.IO.File.Exists(segmentPath);
         if (segmentExists)
         {
-            if (transcodingJob is not null && transcodingJob.HasExited)
+            if (transcodingJob is null || transcodingJob.HasExited)
             {
-                // Transcoding job is over, so assume all existing files are ready
-                _logger.LogDebug("serving up {0} as transcode is over", segmentPath);
+                // Segment files are renamed into place once complete (temp_file), so with no job writing they are ready
+                _logger.LogDebug("serving up {0} as no transcode is running", segmentPath);
                 return GetSegmentResult(state, segmentPath, segmentIndex, transcodingJob);
             }
 
@@ -2010,6 +2008,7 @@ public class DynamicHlsController : BaseJellyfinApiController
     private ActionResult GetSegmentResult(StreamState state, string segmentPath, int segmentIndex, TranscodingJob? transcodingJob)
     {
         var segmentEndingPositionTicks = state.Request.CurrentRuntimeTicks + state.Request.ActualSegmentLengthTicks;
+        HlsSegmentCache.Touch(Path.ChangeExtension(state.OutputFilePath, ".m3u8"));
 
         Response.OnCompleted(() =>
         {
@@ -2065,44 +2064,6 @@ public class DynamicHlsController : BaseJellyfinApiController
         catch (IOException)
         {
             return null;
-        }
-    }
-
-    private async Task DeleteLastFile(string playlistPath, string segmentExtension, int retryCount)
-    {
-        var file = GetLastTranscodingFile(playlistPath, segmentExtension, _fileSystem);
-
-        if (file is null)
-        {
-            return;
-        }
-
-        await DeleteFile(file.FullName, retryCount).ConfigureAwait(false);
-    }
-
-    private async Task DeleteFile(string path, int retryCount)
-    {
-        if (retryCount >= 5)
-        {
-            return;
-        }
-
-        _logger.LogDebug("Deleting partial HLS file {Path}", path);
-
-        try
-        {
-            _fileSystem.DeleteFile(path);
-        }
-        catch (IOException ex)
-        {
-            _logger.LogError(ex, "Error deleting partial stream file(s) {Path}", path);
-
-            await Task.Delay(100).ConfigureAwait(false);
-            await DeleteFile(path, retryCount + 1).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error deleting partial stream file(s) {Path}", path);
         }
     }
 }

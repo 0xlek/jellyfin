@@ -235,9 +235,10 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
 
         job.Stop();
 
-        if (delete(job.Path!))
+        // HLS segments outlive the job; HlsSegmentCacheSweeper removes them once they go unused
+        if (job.Type != TranscodingJobType.Hls && delete(job.Path!))
         {
-            await DeletePartialStreamFiles(job.Path!, job.Type, 0, 1500).ConfigureAwait(false);
+            await DeletePartialStreamFiles(job.Path!, 0, 1500).ConfigureAwait(false);
         }
 
         if (closeLiveStream && !string.IsNullOrWhiteSpace(job.LiveStreamId))
@@ -246,7 +247,7 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         }
     }
 
-    private async Task DeletePartialStreamFiles(string path, TranscodingJobType jobType, int retryCount, int delayMs)
+    private async Task DeletePartialStreamFiles(string path, int retryCount, int delayMs)
     {
         if (retryCount >= 10)
         {
@@ -259,20 +260,13 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
 
         try
         {
-            if (jobType == TranscodingJobType.Progressive)
-            {
-                DeleteProgressivePartialStreamFiles(path);
-            }
-            else
-            {
-                DeleteHlsPartialStreamFiles(path);
-            }
+            DeleteProgressivePartialStreamFiles(path);
         }
         catch (IOException ex)
         {
             _logger.LogError(ex, "Error deleting partial stream file(s) {Path}", path);
 
-            await DeletePartialStreamFiles(path, jobType, retryCount + 1, 500).ConfigureAwait(false);
+            await DeletePartialStreamFiles(path, retryCount + 1, 500).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -285,37 +279,6 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         if (File.Exists(outputFilePath))
         {
             _fileSystem.DeleteFile(outputFilePath);
-        }
-    }
-
-    private void DeleteHlsPartialStreamFiles(string outputFilePath)
-    {
-        var directory = Path.GetDirectoryName(outputFilePath)
-                        ?? throw new ArgumentException("Path can't be a root directory.", nameof(outputFilePath));
-
-        var name = Path.GetFileNameWithoutExtension(outputFilePath);
-
-        var filesToDelete = _fileSystem.GetFilePaths(directory)
-            .Where(f => f.Contains(name, StringComparison.OrdinalIgnoreCase));
-
-        List<Exception>? exs = null;
-        foreach (var file in filesToDelete)
-        {
-            try
-            {
-                _logger.LogDebug("Deleting HLS file {0}", file);
-                _fileSystem.DeleteFile(file);
-            }
-            catch (IOException ex)
-            {
-                (exs ??= new List<Exception>()).Add(ex);
-                _logger.LogError(ex, "Error deleting HLS file {Path}", file);
-            }
-        }
-
-        if (exs is not null)
-        {
-            throw new AggregateException("Error deleting HLS files", exs);
         }
     }
 
@@ -528,7 +491,6 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         if (!transcodingJob.HasExited)
         {
             StartThrottler(state, transcodingJob);
-            StartSegmentCleaner(state, transcodingJob);
         }
         else if (transcodingJob.ExitCode != 0)
         {
@@ -557,22 +519,6 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
            && state.RunTimeTicks.Value >= TimeSpan.FromMinutes(5).Ticks
            && state.IsInputVideo
            && state.VideoType == VideoType.VideoFile;
-
-    private void StartSegmentCleaner(StreamState state, TranscodingJob transcodingJob)
-    {
-        if (EnableSegmentCleaning(state))
-        {
-            transcodingJob.TranscodingSegmentCleaner = new TranscodingSegmentCleaner(transcodingJob, _loggerFactory.CreateLogger<TranscodingSegmentCleaner>(), _serverConfigurationManager, _fileSystem, _mediaEncoder, state.SegmentLength);
-            transcodingJob.TranscodingSegmentCleaner.Start();
-        }
-    }
-
-    private static bool EnableSegmentCleaning(StreamState state)
-        => state.InputProtocol is MediaProtocol.File or MediaProtocol.Http
-           && state.IsInputVideo
-           && state.TranscodingType == TranscodingJobType.Hls
-           && state.RunTimeTicks.HasValue
-           && state.RunTimeTicks.Value >= TimeSpan.FromMinutes(5).Ticks;
 
     private TranscodingJob OnTranscodeBeginning(
         string path,

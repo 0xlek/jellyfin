@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
@@ -17,6 +18,7 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.MediaInfo;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Net.Http.Headers;
 
@@ -27,6 +29,12 @@ namespace Jellyfin.Api.Helpers;
 /// </summary>
 public static class StreamingHelpers
 {
+    // Parameters that identify a session or a segment rather than what is streamed
+    private static readonly HashSet<string> _volatileStreamParams = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "PlaySessionId", "DeviceId", "api_key", "ApiKey", "Tag", "StartTimeTicks", "runtimeTicks", "actualSegmentLengthTicks"
+    };
+
     /// <summary>
     /// Gets the current streaming state.
     /// </summary>
@@ -255,7 +263,9 @@ public static class StreamingHelpers
             ? GetOutputFileExtension(state, mediaSource)
             : ("." + GetContainerFileExtension(state.OutputContainer));
 
-        state.OutputFilePath = GetOutputFilePath(state, ext, serverConfigurationManager, streamingRequest.DeviceId, streamingRequest.PlaySessionId);
+        state.OutputFilePath = transcodingJobType == TranscodingJobType.Hls
+            ? GetHlsOutputFilePath(state, ext, serverConfigurationManager, streamingRequest.DeviceId, httpRequest.Query)
+            : GetOutputFilePath(state, ext, serverConfigurationManager, streamingRequest.DeviceId, streamingRequest.PlaySessionId);
 
         return state;
     }
@@ -383,6 +393,29 @@ public static class StreamingHelpers
         var folder = serverConfigurationManager.GetTranscodePath();
 
         return Path.Combine(folder, filename + ext);
+    }
+
+    /// <summary>
+    /// Names HLS output after what is streamed rather than the play session, so a reload, resume or seek on the same
+    /// device finds the segments it already made. Segment boundaries are fixed points in the file (every keyframe for a
+    /// remux, forced keyframes on an even grid for a transcode), so segments from different ffmpeg runs fit together.
+    /// </summary>
+    private static string GetHlsOutputFilePath(StreamState state, string outputFileExtension, IServerConfigurationManager serverConfigurationManager, string? deviceId, IQueryCollection query)
+    {
+        var data = new StringBuilder(state.MediaPath).Append('|').Append(deviceId);
+        if (state.InputProtocol == MediaProtocol.File && File.Exists(state.MediaPath))
+        {
+            var file = new FileInfo(state.MediaPath);
+            data.Append('|').Append(file.Length).Append('|').Append(file.LastWriteTimeUtc.Ticks);
+        }
+
+        foreach (var param in query.Where(p => !_volatileStreamParams.Contains(p.Key)).OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            data.Append('|').Append(param.Key.ToLowerInvariant()).Append('=').Append(param.Value.ToString());
+        }
+
+        var filename = data.ToString().GetMD5().ToString("N", CultureInfo.InvariantCulture);
+        return Path.Combine(serverConfigurationManager.GetTranscodePath(), filename + outputFileExtension.ToLowerInvariant());
     }
 
     /// <summary>
